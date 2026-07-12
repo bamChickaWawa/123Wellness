@@ -1,12 +1,13 @@
 import {
   getUser,
   getCheckInsForUser,
+  getStreakForUser,
   getSupportFlaggedUserIds
 } from '@/lib/db/queries';
 import { CheckInForm } from './check-in-form';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
-import { AlertTriangle } from 'lucide-react';
+import { Flame, AlertTriangle } from 'lucide-react';
 
 function sentimentBadge(sentiment: string) {
   const styles: Record<string, string> = {
@@ -21,14 +22,23 @@ export default async function CheckInsPage() {
   const user = await getUser();
   const isEducator = user?.role === 'owner';
 
-  const [feed, flaggedIds] = await Promise.all([
+  const [feed, streak, flaggedIds] = await Promise.all([
     getCheckInsForUser(),
+    isEducator ? Promise.resolve(0) : getStreakForUser(),
     isEducator ? getSupportFlaggedUserIds() : Promise.resolve(new Set<number>())
   ]);
 
   return (
     <section className="flex-1 p-4 lg:p-8">
-      <h1 className="text-lg lg:text-2xl font-medium mb-6">Check-ins</h1>
+      <div className="flex items-center gap-4 mb-6">
+        <h1 className="text-lg lg:text-2xl font-medium">Check-ins</h1>
+        {!isEducator && streak > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-3 py-1 text-sm font-medium text-orange-700">
+            <Flame className="h-4 w-4" />
+            {streak} day streak
+          </span>
+        )}
+      </div>
 
       {!isEducator && <CheckInForm />}
 

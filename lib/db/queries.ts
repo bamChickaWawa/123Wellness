@@ -129,6 +129,48 @@ export async function getTeamForUser() {
   return result?.team || null;
 }
 
+// Returns the logged-in student's consecutive check-in streak (calendar days,
+// UTC). Counts backward from today; if today has no check-in yet, starts from
+// yesterday so the streak doesn't reset the moment a student opens the app.
+export async function getStreakForUser(): Promise<number> {
+  const user = await getUser();
+  if (!user || user.role !== 'member') return 0;
+
+  const membership = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, user.id))
+    .limit(1);
+
+  if (membership.length === 0) return 0;
+  const teamId = membership[0].teamId;
+
+  const rows = await db
+    .selectDistinct({ date: sql<string>`DATE(${checkIns.createdAt})` })
+    .from(checkIns)
+    .where(and(eq(checkIns.userId, user.id), eq(checkIns.teamId, teamId)))
+    .orderBy(desc(sql`DATE(${checkIns.createdAt})`));
+
+  const dateSet = new Set(rows.map((r) => r.date));
+  if (dateSet.size === 0) return 0;
+
+  const todayUtc = new Date();
+  todayUtc.setUTCHours(0, 0, 0, 0);
+
+  let cursor = new Date(todayUtc);
+  // Grace: if today not yet checked in, start counting from yesterday
+  if (!dateSet.has(cursor.toISOString().slice(0, 10))) {
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+
+  let streak = 0;
+  while (dateSet.has(cursor.toISOString().slice(0, 10))) {
+    streak++;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  return streak;
+}
+
 // Returns sentiment counts for the last 7 days for the teacher's class.
 // Used by the Insights page.
 export async function getWeeklySentimentBreakdown(): Promise<
