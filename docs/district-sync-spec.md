@@ -173,6 +173,49 @@ CSV imports do not have provider-assigned stable IDs. The match key is **email a
 
 **Sprint cadence:** 2-week sprints starting 2026-07-14. M1–M4 = Sprints 1–4. M5 = Sprint 5.
 
+```mermaid
+gantt
+    title District Roster Sync — Delivery Timeline
+    dateFormat  YYYY-MM-DD
+    axisFormat  %b %d
+
+    section Sprint 1 · M1 Foundation
+    1.1 sync_source / external_id columns   :s11, 2026-07-14, 4d
+    1.2 sync_runs audit table               :s12, 2026-07-14, 2d
+    1.3 /api/sync stub                      :s13, 2026-07-16, 2d
+    1.4 district_id + left_at + seed        :s14, 2026-07-18, 2d
+    M1 Foundation                           :milestone, m1, 2026-07-25, 0d
+
+    section Sprint 2 · M2 Clever Adapter
+    2.1 Clever OAuth2 client                :s21, 2026-07-28, 5d
+    2.2 Fetch and transform roster          :s22, 2026-07-28, 6d
+    2.3 Dry-run sync engine                 :s23, 2026-08-05, 3d
+    M2 Clever Adapter + Dry Run             :milestone, m2, 2026-08-08, 0d
+
+    section Sprint 3 · M3 Live Sync
+    3.1 Upsert users + set-password email   :s31, 2026-08-11, 4d
+    3.2 Upsert teams + memberships          :s32, 2026-08-11, 4d
+    3.3 Zero-record safety guard            :s33, 2026-08-15, 3d
+    3.4 Pilot district E2E test             :s34, 2026-08-18, 4d
+    M3 Live Sync Pilot                      :milestone, m3, 2026-08-22, 0d
+
+    section Sprint 4 · M4 Harden and Roll Out
+    4.1 Vercel Cron schedule                :s41, 2026-08-25, 3d
+    4.2 Failure alerting                    :s42, 2026-08-25, 4d
+    4.3 Sync status admin page              :s43, 2026-08-29, 5d
+    4.4 On-call runbook                     :s44, 2026-09-01, 4d
+    5.1 District enrollment CLI             :s51, 2026-08-25, 5d
+    5.2 Rollout checklist                   :s52, 2026-09-01, 4d
+    M4 Schedule and Roll Out                :milestone, m4, 2026-09-05, 0d
+
+    section Sprint 5 · M5 CSV Import and Export
+    6.1 Downloadable templates              :s61, 2026-09-08, 3d
+    6.2 File upload and validate            :s62, 2026-09-08, 5d
+    6.3 Preview + confirm + apply           :s63, 2026-09-13, 4d
+    6.4 Export roster                       :s64, 2026-09-14, 5d
+    M5 CSV Import and Export                :milestone, m5, 2026-09-19, 0d
+```
+
 ---
 
 ## 6. Epics & Stories
