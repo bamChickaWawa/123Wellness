@@ -20,6 +20,7 @@
 7. [Risk Register](#7-risk-register)
 8. [Open Questions](#8-open-questions)
 9. [Definition of Done](#9-definition-of-done)
+10. [Import / Export File Format & Guidelines](#10-import--export-file-format--guidelines)
 
 ---
 
@@ -27,13 +28,14 @@
 
 **Current state:** Users (teachers and students) are created one-off by an admin through the UI. This doesn't scale to district-level onboarding.
 
-**Desired state:** Each night, 1-2-3 Wellness pulls the full roster for every enrolled district from Clever or ClassLink and automatically creates, updates, and soft-deletes students, teachers, classes, and memberships — with no admin intervention.
+**Desired state:** Each night, 1-2-3 Wellness pulls the full roster for every enrolled district from Clever or ClassLink and automatically creates, updates, and soft-deletes students, teachers, classes, and memberships — with no admin intervention. Districts or schools without a supported roster API can use a CSV or Excel upload instead, producing the same outcome through a different ingest path.
 
 **Success metrics:**
 - Nightly sync completes for all enrolled districts with zero manual steps
 - Sync failures are detected and alerted within 15 minutes
 - A failed sync never blocks students from logging in or checking in
 - On-call can diagnose and recover from a failed run using logs alone, in < 15 min
+- A non-technical admin can complete a CSV import without engineering support
 
 ---
 
@@ -44,35 +46,58 @@
 - Custom field mapping per district
 - Self-serve district onboarding (admin still initiates each district connection)
 - SAML / SSO (separate workstream)
+- Importing wellness check-in data via CSV (roster only)
 
 ---
 
 ## 3. Architecture Overview
 
+Two supported ingest paths. Both write through the same sync engine so idempotency and audit guarantees apply to both.
+
 ```
-Vercel Cron (2 AM nightly)
-        │
-        ▼
-POST /api/sync  ←── secret header auth
-        │
-        ▼
- SyncRunner (per district)
-        │
-        ├── CleverClient.fetchRoster()
-        │       └── students / teachers / sections / enrollments
-        │
-        ├── Diff against DB (by external_id + sync_source)
-        │
-        ├── Upsert users, teams, memberships
-        │
-        ├── Soft-delete removed memberships
-        │
-        └── Write sync_run audit row (status, counts, errors)
+┌─────────────────────────────────────────────────────────────┐
+│  PATH A — Automated nightly API sync                        │
+│                                                             │
+│  Vercel Cron (2 AM nightly)                                 │
+│          │                                                  │
+│          ▼                                                  │
+│  POST /api/sync  ←── secret header auth                     │
+│          │                                                  │
+│          ▼                                                  │
+│   SyncRunner (per district)                                 │
+│          │                                                  │
+│          ├── CleverClient.fetchRoster()                     │
+│          │       └── students / teachers / sections /       │
+│          │           enrollments                            │
+│          │                                                  │
+│          ├── Diff against DB (external_id + sync_source)    │
+│          ├── Upsert users, teams, memberships               │
+│          ├── Soft-delete removed memberships                │
+│          └── Write sync_run audit row                       │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  PATH B — Manual CSV / Excel upload                         │
+│                                                             │
+│  Owner uploads file in /dashboard/import                    │
+│          │                                                  │
+│          ▼                                                  │
+│  POST /api/import  ←── session auth (owner only)            │
+│          │                                                  │
+│          ▼                                                  │
+│   ImportRunner                                              │
+│          │                                                  │
+│          ├── Parse & validate file (CSV or .xlsx)           │
+│          ├── Compute diff (same engine as Path A)           │
+│          ├── Return preview (create / update / skip counts) │
+│          ├── Owner confirms → apply                         │
+│          └── Write sync_run audit row (source='csv_import') │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Idempotency guarantee:** Every write is keyed on `(sync_source, external_id)`. Re-running the same sync payload produces the same DB state. Safe to retry on failure.
+**Idempotency guarantee:** Every write is keyed on `(sync_source, external_id)` for API syncs, and on `email` for CSV imports. Re-running the same file or payload produces the same DB state. Safe to retry.
 
-**Safety rule:** If a provider returns 0 records for any resource type, the sync **skips that resource and alerts** — it never deletes all users or classes.
+**Safety rule:** If a provider or file returns 0 records for any resource type that previously had records, the sync **skips that resource and alerts** — it never deletes all users or classes.
 
 ---
 
@@ -99,21 +124,25 @@ CREATE UNIQUE INDEX teams_sync_identity
   ON teams (sync_source, external_id)
   WHERE sync_source IS NOT NULL;
 
--- Audit log for every sync attempt
+-- Soft-delete support for memberships
+ALTER TABLE team_members
+  ADD COLUMN left_at TIMESTAMP;
+
+-- Audit log for every sync / import attempt
 CREATE TABLE sync_runs (
   id              SERIAL PRIMARY KEY,
-  source          VARCHAR(50)  NOT NULL,
+  source          VARCHAR(50)  NOT NULL,   -- 'clever' | 'csv_import' | 'classlink'
   district_id     VARCHAR(255) NOT NULL,
   started_at      TIMESTAMP    NOT NULL DEFAULT NOW(),
   completed_at    TIMESTAMP,
-  status          VARCHAR(20)  NOT NULL, -- running | success | failed | skipped
+  status          VARCHAR(20)  NOT NULL,   -- running | success | failed | skipped
   records_seen    INTEGER,
   records_changed INTEGER,
   errors          JSONB
 );
 ```
 
-### 4b. External ID mapping
+### 4b. External ID mapping (API sync)
 
 | Provider concept | Our table | Match key |
 |---|---|---|
@@ -126,6 +155,10 @@ CREATE TABLE sync_runs (
 
 **Manual records are never touched:** Any user or team where `sync_source IS NULL` is ignored by the sync engine entirely.
 
+### 4c. Match key for CSV imports
+
+CSV imports do not have provider-assigned stable IDs. The match key is **email address** (case-insensitive). If a row's email matches an existing user, the row is treated as an update; otherwise it is an insert. See [Section 10](#10-import--export-file-format--guidelines) for full column definitions.
+
 ---
 
 ## 5. Milestones
@@ -134,10 +167,11 @@ CREATE TABLE sync_runs (
 |---|---|---|---|---|
 | **M1** | Foundation | 2026-07-25 | @tl + @be1 | Migration runs on prod without downtime; `/api/sync` returns 200 with valid secret; existing users unaffected |
 | **M2** | Clever Adapter + Dry Run | 2026-08-08 | @be1 + @be2 | Dry-run against Clever sandbox logs correct diffs with zero DB writes; all resource types covered |
-| **M3** | Live Sync — Pilot District | 2026-08-22 | @be1 + @qa | 3 consecutive nightly syncs succeed on one real district; re-run is a no-op; students can log in post-sync |
+| **M3** | Live Sync — Pilot District | 2026-08-22 | @be1 + @qa | 3 consecutive nightly syncs succeed on one real district; re-run is a no-op; synced students can log in post-sync |
 | **M4** | Schedule, Harden & Roll Out | 2026-09-05 | @tl + @devops | 5+ districts syncing nightly via Vercel Cron; on-call runbook complete; zero student login disruptions over 2-week observation |
+| **M5** | CSV / Excel Import & Export | 2026-09-19 | @fe + @be1 | Non-technical admin completes full school import from CSV without engineering support; export downloads correct roster |
 
-**Sprint cadence:** 2-week sprints starting 2026-07-14. M1 = Sprint 1, M2 = Sprint 2, M3 = Sprint 3, M4 = Sprint 4.
+**Sprint cadence:** 2-week sprints starting 2026-07-14. M1–M4 = Sprints 1–4. M5 = Sprint 5.
 
 ---
 
@@ -179,6 +213,7 @@ Lay the schema and API surface that all later epics build on. No sync logic yet.
 
 **Acceptance criteria:**
 - [ ] `sync_runs` table created with columns: `id`, `source`, `district_id`, `started_at`, `completed_at`, `status`, `records_seen`, `records_changed`, `errors JSONB`
+- [ ] `source` accepts `'clever'`, `'classlink'`, and `'csv_import'`
 - [ ] Status enum enforced at the application layer: `running | success | failed | skipped`
 - [ ] `errors` stores structured error objects (code, message, affected IDs), not raw stack traces
 - [ ] PII (names, emails) is never written to `errors`
@@ -201,11 +236,12 @@ Lay the schema and API surface that all later epics build on. No sync logic yet.
 
 ---
 
-#### Story 1.4 — Add `district_id` to teams + seed one test district
-**Points:** 1 · **Assignee:** @be1 · **Milestone:** M1
+#### Story 1.4 — Add `district_id` to teams + `left_at` to memberships + seed one test district
+**Points:** 2 · **Assignee:** @be1 · **Milestone:** M1
 
 **Acceptance criteria:**
 - [ ] `district_id VARCHAR(255)` added to `teams`
+- [ ] `left_at TIMESTAMP` added to `team_members` (NULL = active member)
 - [ ] Seed script creates one team with `sync_source = 'clever'`, `external_id = 'test-section-1'`, `district_id = 'test-district-1'` for integration tests
 - [ ] Existing seed data unchanged
 
@@ -286,7 +322,8 @@ Wire the Clever adapter output into actual DB upserts. One pilot district valida
 - [ ] Existing users (matched by `external_id + sync_source`) have `name` and `email` updated if changed
 - [ ] Users with `sync_source IS NULL` (manually created) are never modified
 - [ ] Email collision with a manual user: assign `external_id` and `sync_source` to the existing row; do not create a duplicate
-- [ ] No passwords are set for synced users (they authenticate via SSO / future SAML)
+- [ ] Synced users are created without a `passwordHash`. On their first login attempt, the auth flow detects the missing password and sends a "set your password" email to their roster address. This must be implemented and tested before M3 pilot go-live (tracked as a dependency in Story 3.4)
+- [ ] The set-password email link expires after 24 hours and is single-use
 - [ ] Upsert is a single `INSERT ... ON CONFLICT DO UPDATE` per batch (not N individual queries)
 
 ---
@@ -298,8 +335,8 @@ Wire the Clever adapter output into actual DB upserts. One pilot district valida
 - [ ] New teams inserted with `sync_source`, `external_id`, `district_id`, `name`
 - [ ] Existing teams updated (name changes flow from provider)
 - [ ] New memberships inserted; existing memberships left unchanged
-- [ ] Removed memberships (present in DB, absent from provider payload) are soft-deleted: `left_at = NOW()` added to a new `team_members.left_at` column rather than hard-deleted
-- [ ] A student removed then re-added gets their `left_at` cleared
+- [ ] Removed memberships (present in DB, absent from provider payload) are soft-deleted: `left_at = NOW()` set on the `team_members` row rather than hard-deleted
+- [ ] A student removed then re-added gets their `left_at` cleared (`NULL`)
 - [ ] Teams with zero enrollments are created but left empty (not an error)
 
 ---
@@ -325,7 +362,7 @@ Wire the Clever adapter output into actual DB upserts. One pilot district valida
 **Acceptance criteria:**
 - [ ] Admin can trigger sync for a specific district via `POST /api/sync { districtId, source }` with the secret header
 - [ ] Running the same trigger twice produces no changes on the second run (idempotent)
-- [ ] Pilot district teacher and students can log in and submit check-ins after sync
+- [ ] Pilot district teacher and students can log in and submit check-ins after sync (set-password email flow verified)
 - [ ] `sync_runs` row shows `status = 'success'` with correct record counts
 - [ ] QA sign-off: 3 consecutive nightly syncs complete on pilot district with no manual intervention
 
@@ -371,7 +408,7 @@ Run the sync on a schedule, make failures visible, and give on-call the tools to
 
 **Acceptance criteria:**
 - [ ] `/dashboard/sync-status` page (owner-only; students redirected)
-- [ ] Shows a table: district name, last sync time, status badge (✅ success / ⚠️ skipped / ❌ failed), records changed
+- [ ] Shows a table: district name, last sync time, source (`clever` / `csv_import`), status badge (✅ success / ⚠️ skipped / ❌ failed), records changed
 - [ ] Expandable row shows error detail from `sync_runs.errors` if status is not `success`
 - [ ] Data refreshes on page load (no polling needed for v1)
 - [ ] Page is read-only; no actions available in v1
@@ -420,6 +457,87 @@ The process and tooling for onboarding each new district safely.
 
 ---
 
+### Epic 6 — CSV / Excel Bulk Import & Export
+> Milestone: M5 · Owner: @fe + @be1
+
+Provides a roster ingest path for schools and districts that do not use Clever or ClassLink. Also allows any admin to export their current roster for auditing or migration purposes. Both import and export go through the same sync engine as the API path — no separate code path for writes.
+
+---
+
+#### Story 6.1 — Downloadable roster templates
+**Points:** 2 · **Assignee:** @fe · **Milestone:** M5
+
+**As a** school admin,
+**I want** a pre-formatted template to fill in,
+**so that** I don't have to guess which columns are required or how to format the data.
+
+**Acceptance criteria:**
+- [ ] `/dashboard/import` page (owner-only) offers "Download CSV template" and "Download Excel template" buttons
+- [ ] CSV template: UTF-8 with BOM, headers on row 1, one example student row, one example teacher row (rows marked with `# EXAMPLE — DELETE ME`)
+- [ ] Excel (.xlsx) template: same data, column headers bolded, required columns highlighted yellow, a "Field Guide" sheet describing every column and valid values
+- [ ] Both templates include all columns defined in [Section 10](#10-import--export-file-format--guidelines)
+- [ ] Template version is embedded in the filename: `123wellness-roster-template-v1.csv`
+
+---
+
+#### Story 6.2 — File upload, parse, and validate
+**Points:** 5 · **Assignee:** @be1 · **Milestone:** M5
+
+**As a** school admin,
+**I want** the system to catch mistakes in my file before anything is imported,
+**so that** I can fix errors without having to undo a bad import.
+
+**Acceptance criteria:**
+- [ ] `POST /api/import` accepts multipart form data with a single file field (`roster`)
+- [ ] Accepts `.csv` and `.xlsx` only; returns 400 with a clear message for any other format
+- [ ] Maximum file size: 5 MB. Maximum rows: 10,000. Exceeding either returns a descriptive error.
+- [ ] Parser detects encoding; accepts UTF-8 and UTF-8-with-BOM
+- [ ] Required column validation: returns a structured list of errors by row number if `email`, `name`, or `role` are missing or invalid
+- [ ] `role` must be `student` or `teacher` (case-insensitive); any other value is flagged per row
+- [ ] Email format validated per row (RFC 5322 basic check)
+- [ ] Duplicate emails within the file are flagged (last row wins with a warning, not a hard error)
+- [ ] On success, returns a preview object: `{ toCreate: N, toUpdate: N, toSkip: N, errors: [...] }` — no DB writes yet
+- [ ] Errors in the response include row number, column name, and a human-readable message
+
+---
+
+#### Story 6.3 — Preview confirmation and apply
+**Points:** 3 · **Assignee:** @fe + @be1 · **Milestone:** M5
+
+**As a** school admin,
+**I want** to review what the import will do before it runs,
+**so that** I don't accidentally overwrite data I didn't intend to change.
+
+**Acceptance criteria:**
+- [ ] After upload + validation, the UI shows the preview summary: X new users, Y updated, Z skipped (with skip reasons)
+- [ ] Admin must click "Confirm Import" to apply — no auto-apply
+- [ ] On confirm, `POST /api/import/apply` applies the same validated payload to the DB using the standard upsert engine
+- [ ] Apply is idempotent: re-uploading the same file a second time produces no changes
+- [ ] A `sync_runs` row is written with `source = 'csv_import'`, correct counts, and `status = 'success'` or `'failed'`
+- [ ] On completion, the UI shows a success summary or a per-row error list
+- [ ] Any rows that failed to apply are listed with their error; successfully applied rows are not rolled back due to another row's failure (partial success is allowed)
+
+---
+
+#### Story 6.4 — Export current roster
+**Points:** 3 · **Assignee:** @fe + @be1 · **Milestone:** M5
+
+**As a** school admin,
+**I want** to download the current roster as a CSV or Excel file,
+**so that** I can audit who has access, migrate to another system, or hand it off to IT.
+
+**Acceptance criteria:**
+- [ ] `/dashboard/import` page includes "Export Roster" with CSV and Excel options
+- [ ] Export includes: `name`, `email`, `role`, `class_name` (comma-separated if multiple), `sync_source`, `joined_at`
+- [ ] Export does **not** include: passwords, check-in notes, wellness data, internal user IDs
+- [ ] Students who have `left_at` set on all their memberships are excluded from the export by default; an "Include inactive" checkbox adds them back with an `active` column (`true`/`false`)
+- [ ] Excel export: column headers bolded, dates formatted as `YYYY-MM-DD`, one row per user
+- [ ] CSV export: UTF-8 with BOM (for Excel compatibility on Windows), RFC 4180 compliant
+- [ ] Export is owner-only; students and unauthenticated requests return 403
+- [ ] Filename includes the date: `123wellness-roster-2026-07-12.csv`
+
+---
+
 ## 7. Risk Register
 
 | # | Risk | Likelihood | Impact | Mitigation |
@@ -432,6 +550,9 @@ The process and tooling for onboarding each new district safely.
 | R6 | A removed student retains access after sync | Low | High | Soft-delete sets `left_at`; auth middleware checks this field before allowing login |
 | R7 | Sync secret leaked / endpoint hit by unauthorized caller | Low | Critical | Secret rotated quarterly; 401 on mismatch; endpoint not in public docs |
 | R8 | Schema migration causes downtime on a large users table | Medium | High | Run migration during low-traffic window; test on a copy of prod data first |
+| R9 | Malformed or non-UTF-8 CSV causes parser crash | Medium | Medium | Validate encoding before parsing; return 400 with a human-readable error (Story 6.2) |
+| R10 | Admin exports roster and stores it insecurely | Medium | High | Export contains no wellness data; add a download warning banner: "This file contains PII — handle per your district's data policy" |
+| R11 | Large import file (10k rows) times out on Vercel's 60s function limit | Low | Medium | Stream parse + chunk upserts in batches of 500; return a job ID for async status polling if needed |
 
 ---
 
@@ -447,6 +568,7 @@ These need answers from Angel / Drew before building begins.
 | Q4 | What is the SLA if sync fails — same-day fix, or next-cycle (24h) is acceptable? | 2026-07-12 | @pm | M4 start |
 | Q5 | Does sending student notes to a future LLM-scoring API create FERPA / COPPA obligations we need legal sign-off on? | 2026-07-12 | legal | Before any LLM feature |
 | Q6 | Do we need ClassLink support before the first paid district goes live? | 2026-07-12 | @pm | M1 start |
+| Q7 | For schools using CSV import: who is responsible for keeping the file up to date — IT, the admin, or Customer Success? This affects how often re-imports are expected and whether we need to prompt admins. | 2026-07-12 | @pm | M5 start |
 
 ---
 
@@ -468,3 +590,99 @@ A **milestone** is done when:
 - [ ] All stories for that milestone meet the Definition of Done above
 - [ ] Exit criteria in the [Milestones](#5-milestones) table are met and signed off by @tl and @pm
 - [ ] Retrospective held and action items logged
+
+---
+
+## 10. Import / Export File Format & Guidelines
+
+This section defines the canonical file format for CSV and Excel roster imports and exports. It is the authoritative reference for template generation (Story 6.1), parser validation (Story 6.2), and export shape (Story 6.4).
+
+---
+
+### 10a. Import column definitions
+
+| Column | Required | Format | Valid values / notes |
+|---|---|---|---|
+| `email` | **Yes** | Text | Valid email address. Used as the match key — must be unique within the file. Case-insensitive. |
+| `name` | **Yes** | Text | Full name. Max 255 characters. |
+| `role` | **Yes** | Text | `student` or `teacher` (case-insensitive). `student` maps to `role = member`; `teacher` maps to `role = owner`. |
+| `class_name` | No | Text | Name of the class / section to enroll this person in. If the class does not exist it will be created. To enroll in multiple classes, repeat the row with a different `class_name`. |
+| `external_id` | No | Text | Your system's stable ID for this person (SIS ID, etc.). Stored as `external_id` with `sync_source = 'csv_import'`. If omitted, email is used as the match key only. |
+| `district_id` | No | Text | Groups classes under a district. Required if you are importing multiple schools in one file. |
+
+**Rules:**
+- Row 1 must be the header row. Column order does not matter, but names must match exactly (case-insensitive).
+- Blank rows are silently skipped.
+- Rows starting with `#` are treated as comments and skipped.
+- If a row's email matches an existing user, **only `name` and `class_name` are updated** — role is never downgraded by an import.
+- Users already in the system via a Clever sync (`sync_source = 'clever'`) will not be modified by a CSV import. Their row will appear in the preview as `skipped (managed by Clever)`.
+
+---
+
+### 10b. Export column definitions
+
+| Column | Notes |
+|---|---|
+| `name` | User's full name |
+| `email` | User's email address |
+| `role` | `student` or `teacher` |
+| `class_name` | Comma-separated list of classes the user belongs to |
+| `sync_source` | `clever`, `csv_import`, or blank (manually created) |
+| `external_id` | Provider or import ID, if set |
+| `joined_at` | ISO 8601 date the user was created in 1-2-3 Wellness (`YYYY-MM-DD`) |
+| `active` | `true` / `false`. Only present when "Include inactive" is checked. |
+
+Wellness data (check-in notes, emotions, sentiment scores) is **never included in exports.**
+
+---
+
+### 10c. File encoding and formatting
+
+**CSV:**
+- Encoding: UTF-8 with BOM (`\xEF\xBB\xBF` prefix). Required for correct display when opened in Excel on Windows.
+- Line endings: CRLF (`\r\n`) for maximum Excel compatibility.
+- Quoting: any field containing a comma, double-quote, or newline must be wrapped in double-quotes. Internal double-quotes are escaped as `""`. (RFC 4180)
+- Date fields: ISO 8601 (`YYYY-MM-DD`).
+
+**Excel (.xlsx):**
+- Generated with a library that writes true OOXML (e.g. `exceljs`), not CSV-renamed-as-xlsx.
+- Sheet 1: `Roster` — the data.
+- Sheet 2: `Field Guide` — one row per column with name, required flag, description, and example value.
+- Required columns highlighted yellow in row 1.
+- Date columns formatted as `YYYY-MM-DD` (not a locale-specific date serial).
+- Max column width: 50 characters (auto-fit up to that cap).
+
+---
+
+### 10d. Validation error format
+
+When the import API returns validation errors, each error object follows this shape:
+
+```json
+{
+  "row": 4,
+  "column": "email",
+  "value": "not-an-email",
+  "message": "Invalid email address"
+}
+```
+
+The API response wraps errors in:
+
+```json
+{
+  "valid": false,
+  "preview": null,
+  "errors": [ ...error objects... ]
+}
+```
+
+A file with any hard errors returns `valid: false` and cannot be applied until the errors are fixed. Warnings (e.g. duplicate email within file) appear in a separate `warnings` array and do not block import.
+
+---
+
+### 10e. PII and data handling notice
+
+> **For admins:** The export file contains personally identifiable information (names and email addresses of students and staff). Handle it according to your district's data governance policy. Do not share it outside of authorized personnel. Delete the file when it is no longer needed.
+>
+> **For engineers:** The export endpoint is owner-only and must never be accessible without an active authenticated session. The import endpoint must log only row numbers and error codes — never the raw cell values — to `sync_runs.errors`.
