@@ -52,7 +52,26 @@ The page is a Next.js App Router server component. The first thing it does is `a
 
 ---
 
-### 4. Delete your own check-in _(~30 min)_
+### 4. Crisis keyword detection _(~40 min)_
+
+**What:** When a student's check-in note contains high-risk language (e.g. "suicide", "want to die", "kill myself"), the teacher's page shows a bold red **URGENT — Immediate Attention Required** banner at the very top of the page, above all other content, listing the student(s) by name. The specific check-in entry is also outlined in red in the feed with a "crisis flag" badge. Crisis-flagged entries cannot be deleted by the student — the record is preserved so the teacher can act on it.
+
+**How it works:**  
+`lib/wellness/crisis.ts` exports `hasCrisisKeywords(text)`, which lowercases the note and checks it against a list of ~20 high-risk phrases. The function is called in two places: (1) in the server component when rendering the teacher feed, to identify flagged entries; (2) in the `deleteCheckIn` server action, to block deletion of flagged records.
+
+Detection is intentionally broad — false positives (a student writing "I don't want to kill myself... just tired") are far less harmful than a missed genuine crisis. Teachers are trained to assess context.
+
+**Key decisions:**
+- Flags are computed from the note text at render time, not stored in the database. This means no migration is needed and the keyword list can be updated without a schema change. The tradeoff: if a student edits their note (not implemented), the flag could disappear. For production, I'd add a `crisisFlag boolean` column set at insert time so the record is immutable.
+- The crisis banner appears **above the streak badge, support flag, and everything else** — it's the first thing a teacher sees when they open the page.
+- Students cannot delete crisis-flagged entries. The block is enforced in the server action (not just hidden in the UI), so it cannot be bypassed via raw requests.
+- The keyword check is not exposed to students — the note content is shown as normal in the student's own feed; only the teacher sees the flag.
+
+**What I'd improve:** Add push notifications / email to teachers the moment a crisis check-in is submitted (not just when they open the dashboard). Also consider a separate "crisis log" page that shows only flagged entries with timestamps, so teachers can review the history without scrolling through the full feed.
+
+---
+
+### 5. Delete your own check-in _(~30 min)_
 
 **What:** A trash icon on each check-in row in the student view. Clicking it deletes the entry immediately (with a spinner while the server action runs).
 

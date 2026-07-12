@@ -12,6 +12,7 @@ import {
 } from '@/lib/db/schema';
 import { validatedActionWithUser } from '@/lib/auth/middleware';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
+import { hasCrisisKeywords } from '@/lib/wellness/crisis';
 
 const logCheckInSchema = z.object({
   emotion: z.string().min(1, 'Please choose how you feel.'),
@@ -70,13 +71,18 @@ export const deleteCheckIn = validatedActionWithUser(
   deleteCheckInSchema,
   async (data, _formData, user) => {
     const [existing] = await db
-      .select({ userId: checkIns.userId })
+      .select({ userId: checkIns.userId, note: checkIns.note })
       .from(checkIns)
       .where(eq(checkIns.id, data.checkInId))
       .limit(1);
 
     if (!existing || existing.userId !== user.id) {
       return { error: 'Check-in not found or not yours to delete.' };
+    }
+
+    // Preserve flagged entries so teachers can act on them.
+    if (hasCrisisKeywords(existing.note)) {
+      return { error: 'This check-in has been flagged and cannot be deleted.' };
     }
 
     await db.delete(checkIns).where(eq(checkIns.id, data.checkInId));

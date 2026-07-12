@@ -9,7 +9,8 @@ import { CheckInFilters } from './checkin-filters';
 import { DeleteCheckInButton } from './delete-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
-import { Flame, AlertTriangle } from 'lucide-react';
+import { hasCrisisKeywords } from '@/lib/wellness/crisis';
+import { Flame, AlertTriangle, ShieldAlert } from 'lucide-react';
 
 function sentimentBadge(sentiment: string) {
   const styles: Record<string, string> = {
@@ -35,8 +36,44 @@ export default async function CheckInsPage({
     isEducator ? getSupportFlaggedUserIds() : Promise.resolve(new Set<number>())
   ]);
 
+  // Crisis entries: check-ins whose note contains high-risk language.
+  // Computed here (not stored) — see SOLUTION.md for the tradeoff note.
+  const crisisEntries = isEducator
+    ? feed.filter((c) => hasCrisisKeywords(c.note))
+    : [];
+  const crisisUserNames = [
+    ...new Set(crisisEntries.map((c) => c.userName || c.userEmail || 'Unknown'))
+  ];
+  const crisisCheckInIds = new Set(crisisEntries.map((c) => c.id));
+
   return (
     <section className="flex-1 p-4 lg:p-8">
+      {/* ── Crisis alert — shown above everything else ── */}
+      {isEducator && crisisEntries.length > 0 && (
+        <div className="mb-6 rounded-lg border-2 border-red-500 bg-red-50 p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <ShieldAlert className="h-5 w-5 shrink-0 text-red-600" />
+            <span className="font-bold text-red-700 uppercase tracking-wide text-sm">
+              Urgent — Immediate Attention Required
+            </span>
+          </div>
+          <p className="text-sm text-red-700 mb-2">
+            The following student
+            {crisisUserNames.length > 1 ? 's have' : ' has'} used language in
+            their check-in that may indicate a crisis:
+          </p>
+          <ul className="text-sm font-semibold text-red-700 space-y-0.5 mb-3">
+            {crisisUserNames.map((name) => (
+              <li key={name}>• {name}</li>
+            ))}
+          </ul>
+          <p className="text-xs text-red-600 font-medium">
+            Follow your school's crisis response protocol immediately. The
+            flagged entries are highlighted in red below.
+          </p>
+        </div>
+      )}
+
       <div className="flex items-center gap-4 mb-6">
         <h1 className="text-lg lg:text-2xl font-medium">Check-ins</h1>
         {!isEducator && streak > 0 && (
@@ -81,13 +118,21 @@ export default async function CheckInsPage({
             <ul className="divide-y divide-gray-100">
               {feed.map((c) => {
                 const emoji = EMOTION_MAP[c.emotion]?.emoji ?? '•';
-                const needsSupport = isEducator && flaggedIds.has(c.userId);
+                const isCrisis = isEducator && crisisCheckInIds.has(c.id);
+                const needsSupport =
+                  isEducator && !isCrisis && flaggedIds.has(c.userId);
                 const isOwn = !isEducator && c.userId === user?.id;
+                const canDelete = isOwn && !hasCrisisKeywords(c.note);
+
                 return (
                   <li
                     key={c.id}
                     className={`flex items-start gap-3 py-3 ${
-                      needsSupport ? 'rounded-md bg-amber-50 px-2 -mx-2' : ''
+                      isCrisis
+                        ? 'rounded-md border border-red-300 bg-red-50 px-3 -mx-2 my-1'
+                        : needsSupport
+                          ? 'rounded-md bg-amber-50 px-2 -mx-2'
+                          : ''
                     }`}
                   >
                     <span className="text-2xl">{emoji}</span>
@@ -106,6 +151,12 @@ export default async function CheckInsPage({
                             · {c.userName || c.userEmail}
                           </span>
                         )}
+                        {isCrisis && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-red-200 px-2 py-0.5 text-xs font-bold text-red-800">
+                            <ShieldAlert className="h-3 w-3" />
+                            crisis flag
+                          </span>
+                        )}
                         {needsSupport && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-amber-200 px-2 py-0.5 text-xs font-medium text-amber-800">
                             <AlertTriangle className="h-3 w-3" />
@@ -121,7 +172,9 @@ export default async function CheckInsPage({
                       <time className="text-xs text-muted-foreground whitespace-nowrap">
                         {new Date(c.createdAt).toLocaleDateString()}
                       </time>
-                      {isOwn && <DeleteCheckInButton checkInId={c.id} />}
+                      {isOwn && canDelete && (
+                        <DeleteCheckInButton checkInId={c.id} />
+                      )}
                     </div>
                   </li>
                 );
