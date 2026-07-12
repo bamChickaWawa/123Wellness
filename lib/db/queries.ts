@@ -1,4 +1,4 @@
-import { desc, and, eq, isNull } from 'drizzle-orm';
+import { desc, and, eq, isNull, gte, sql } from 'drizzle-orm';
 import { db } from './drizzle';
 import { activityLogs, checkIns, teamMembers, teams, users } from './schema';
 import { cookies } from 'next/headers';
@@ -127,6 +127,38 @@ export async function getTeamForUser() {
   });
 
   return result?.team || null;
+}
+
+// Returns sentiment counts for the last 7 days for the teacher's class.
+// Used by the Insights page.
+export async function getWeeklySentimentBreakdown(): Promise<
+  { sentiment: string; count: number }[]
+> {
+  const user = await getUser();
+  if (!user || user.role !== 'owner') return [];
+
+  const membership = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, user.id))
+    .limit(1);
+
+  if (membership.length === 0) return [];
+  const teamId = membership[0].teamId;
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  return await db
+    .select({
+      sentiment: checkIns.sentiment,
+      count: sql<number>`COUNT(*)::int`
+    })
+    .from(checkIns)
+    .where(
+      and(eq(checkIns.teamId, teamId), gte(checkIns.createdAt, sevenDaysAgo))
+    )
+    .groupBy(checkIns.sentiment);
 }
 
 // Role-aware check-in feed. Teachers/admins (role 'owner') see every check-in
