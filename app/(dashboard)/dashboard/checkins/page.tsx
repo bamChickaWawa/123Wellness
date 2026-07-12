@@ -1,7 +1,12 @@
-import { getUser, getCheckInsForUser } from '@/lib/db/queries';
+import {
+  getUser,
+  getCheckInsForUser,
+  getSupportFlaggedUserIds
+} from '@/lib/db/queries';
 import { CheckInForm } from './check-in-form';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
+import { AlertTriangle } from 'lucide-react';
 
 function sentimentBadge(sentiment: string) {
   const styles: Record<string, string> = {
@@ -15,7 +20,11 @@ function sentimentBadge(sentiment: string) {
 export default async function CheckInsPage() {
   const user = await getUser();
   const isEducator = user?.role === 'owner';
-  const feed = await getCheckInsForUser();
+
+  const [feed, flaggedIds] = await Promise.all([
+    getCheckInsForUser(),
+    isEducator ? getSupportFlaggedUserIds() : Promise.resolve(new Set<number>())
+  ]);
 
   return (
     <section className="flex-1 p-4 lg:p-8">
@@ -23,11 +32,22 @@ export default async function CheckInsPage() {
 
       {!isEducator && <CheckInForm />}
 
+      {isEducator && flaggedIds.size > 0 && (
+        <div className="mb-6 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+          <span>
+            <strong>{flaggedIds.size}</strong> student
+            {flaggedIds.size > 1 ? 's have' : ' has'} logged 2 or more negative
+            check-ins in the last 7 days. Their entries are highlighted below.
+          </span>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>
             {isEducator
-              ? 'Your class’s recent check-ins'
+              ? "Your class's recent check-ins"
               : 'Your recent check-ins'}
           </CardTitle>
         </CardHeader>
@@ -38,8 +58,14 @@ export default async function CheckInsPage() {
             <ul className="divide-y divide-gray-100">
               {feed.map((c) => {
                 const emoji = EMOTION_MAP[c.emotion]?.emoji ?? '•';
+                const needsSupport = isEducator && flaggedIds.has(c.userId);
                 return (
-                  <li key={c.id} className="flex items-start gap-3 py-3">
+                  <li
+                    key={c.id}
+                    className={`flex items-start gap-3 py-3 ${
+                      needsSupport ? 'rounded-md bg-amber-50 px-2 -mx-2' : ''
+                    }`}
+                  >
                     <span className="text-2xl">{emoji}</span>
                     <div className="flex-1">
                       <div className="flex flex-wrap items-center gap-2">
@@ -54,6 +80,12 @@ export default async function CheckInsPage() {
                         {isEducator && (
                           <span className="text-sm text-muted-foreground">
                             · {c.userName || c.userEmail}
+                          </span>
+                        )}
+                        {needsSupport && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-200 px-2 py-0.5 text-xs font-medium text-amber-800">
+                            <AlertTriangle className="h-3 w-3" />
+                            needs support
                           </span>
                         )}
                       </div>

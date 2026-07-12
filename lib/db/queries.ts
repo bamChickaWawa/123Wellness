@@ -161,6 +161,40 @@ export async function getWeeklySentimentBreakdown(): Promise<
     .groupBy(checkIns.sentiment);
 }
 
+// Returns user IDs of students with ≥2 negative check-ins in the last 7 days.
+// Only usable by teachers (role 'owner').
+export async function getSupportFlaggedUserIds(): Promise<Set<number>> {
+  const user = await getUser();
+  if (!user || user.role !== 'owner') return new Set();
+
+  const membership = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, user.id))
+    .limit(1);
+
+  if (membership.length === 0) return new Set();
+  const teamId = membership[0].teamId;
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  const flagged = await db
+    .select({ userId: checkIns.userId })
+    .from(checkIns)
+    .where(
+      and(
+        eq(checkIns.teamId, teamId),
+        eq(checkIns.sentiment, 'negative'),
+        gte(checkIns.createdAt, sevenDaysAgo)
+      )
+    )
+    .groupBy(checkIns.userId)
+    .having(sql`count(*) >= 2`);
+
+  return new Set(flagged.map((f) => f.userId));
+}
+
 // Role-aware check-in feed. Teachers/admins (role 'owner') see every check-in
 // for their class; students (role 'member') see only their own.
 export async function getCheckInsForUser() {
