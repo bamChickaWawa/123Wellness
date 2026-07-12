@@ -1,4 +1,4 @@
-import { desc, and, eq, isNull, gte, sql } from 'drizzle-orm';
+import { desc, and, eq, isNull, gte, lt, sql } from 'drizzle-orm';
 import { db } from './drizzle';
 import { activityLogs, checkIns, teamMembers, teams, users } from './schema';
 import { cookies } from 'next/headers';
@@ -239,11 +239,15 @@ export async function getSupportFlaggedUserIds(): Promise<Set<number>> {
 
 // Role-aware check-in feed. Teachers/admins (role 'owner') see every check-in
 // for their class; students (role 'member') see only their own.
-export async function getCheckInsForUser() {
+// Accepts optional filters (sentiment, date range) that map to URL query params
+// so filtered views are shareable/bookmarkable.
+export async function getCheckInsForUser(filters?: {
+  sentiment?: string;
+  from?: string;
+  to?: string;
+}) {
   const user = await getUser();
-  if (!user) {
-    return [];
-  }
+  if (!user) return [];
 
   const membership = await db
     .select({ teamId: teamMembers.teamId })
@@ -251,15 +255,33 @@ export async function getCheckInsForUser() {
     .where(eq(teamMembers.userId, user.id))
     .limit(1);
 
-  if (membership.length === 0) {
-    return [];
-  }
+  if (membership.length === 0) return [];
 
   const teamId = membership[0].teamId;
   const canSeeWholeClass = user.role === 'owner';
-  const whereClause = canSeeWholeClass
+
+  const scopeClause = canSeeWholeClass
     ? eq(checkIns.teamId, teamId)
     : and(eq(checkIns.teamId, teamId), eq(checkIns.userId, user.id));
+
+  const VALID_SENTIMENTS = ['positive', 'neutral', 'negative'];
+  const sentimentClause =
+    filters?.sentiment && VALID_SENTIMENTS.includes(filters.sentiment)
+      ? eq(checkIns.sentiment, filters.sentiment)
+      : undefined;
+
+  const fromClause = filters?.from
+    ? gte(checkIns.createdAt, new Date(filters.from))
+    : undefined;
+
+  const toClause = filters?.to
+    ? lt(
+        checkIns.createdAt,
+        new Date(
+          new Date(filters.to).setDate(new Date(filters.to).getDate() + 1)
+        )
+      )
+    : undefined;
 
   return await db
     .select({
@@ -274,7 +296,7 @@ export async function getCheckInsForUser() {
     })
     .from(checkIns)
     .leftJoin(users, eq(checkIns.userId, users.id))
-    .where(whereClause)
+    .where(and(scopeClause, sentimentClause, fromClause, toClause))
     .orderBy(desc(checkIns.createdAt))
     .limit(100);
 }

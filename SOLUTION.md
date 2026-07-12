@@ -52,6 +52,42 @@ The page is a Next.js App Router server component. The first thing it does is `a
 
 ---
 
+### 4. Delete your own check-in _(~30 min)_
+
+**What:** A trash icon on each check-in row in the student view. Clicking it deletes the entry immediately (with a spinner while the server action runs).
+
+**How it works:**  
+`deleteCheckIn` in `actions.ts` uses `validatedActionWithUser` — the same pattern as `logCheckIn`. Before running the `DELETE`, it fetches the check-in and compares `userId` to the logged-in user. If they don't match (or the row doesn't exist), it returns an error and nothing is deleted. The enforcement is entirely server-side.
+
+`DeleteCheckInButton` is a thin client component that wraps a `<form action={deleteCheckIn}>` and uses `useFormStatus` to show a spinner during the pending state. No JS required for the actual submission — the form degrades gracefully.
+
+**Key decisions:**
+- Ownership check happens in the server action, not just by filtering the UI. A student who crafts a raw POST with someone else's `checkInId` gets an error, not a successful delete.
+- No confirmation dialog — the list reloads immediately after deletion. For a production app I'd add an undo toast or a confirm step.
+- Teachers do not see delete buttons (they don't own student check-ins).
+
+**What I'd improve:** Optimistic UI so the row disappears instantly on click rather than waiting for the server round-trip. Also a brief undo window (like Gmail's delete) would be a nicer UX than a hard delete.
+
+---
+
+### 5. Filter the feed by sentiment and date range _(~35 min)_
+
+**What:** A filter bar above the check-in list with a sentiment dropdown and from/to date pickers. Active filters are reflected in the URL as query params (`?sentiment=negative&from=2026-07-01&to=2026-07-12`) so the filtered view is shareable and bookmarkable.
+
+**How it works:**  
+`getCheckInsForUser` now accepts an optional `{ sentiment, from, to }` object. Each non-empty filter is appended to the Drizzle `and()` clause — `undefined` conditions are ignored, so no filter = full feed. The `to` date is made inclusive by incrementing it one day and using `lt` instead of `lte`.
+
+The page reads `searchParams` (Next.js App Router server prop), passes the values to the query, and also passes them as props to `CheckInFilters` (a client component). The filter component uses `router.push` to update the URL on change — sentiment auto-submits on `onChange`, dates require clicking Apply. A "Clear" link appears whenever any filter is active.
+
+**Key decisions:**
+- URL params instead of local state — filters survive a page refresh and can be shared with a colleague ("look at this student's negative check-ins this week").
+- Sentiment values are validated in the query (`VALID_SENTIMENTS.includes(...)`) so a hand-crafted URL with `?sentiment=foo` is silently ignored rather than crashing.
+- Filters apply to both student and teacher views — teachers benefit from filtering the class feed too.
+
+**What I'd improve:** Add a count badge ("Showing 3 of 12 check-ins") so it's clear the feed is filtered. Also debounce the date inputs instead of requiring the Apply button.
+
+---
+
 ## Part 2 — District Roster Sync Design
 
 > **Prompt:** Design a nightly sync that onboards entire school districts from an external roster provider (Clever / ClassLink).
