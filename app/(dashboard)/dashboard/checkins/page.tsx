@@ -5,6 +5,8 @@ import {
   getSupportFlaggedUserIds
 } from '@/lib/db/queries';
 import { CheckInForm } from './check-in-form';
+import { CheckInFilters } from './checkin-filters';
+import { DeleteCheckInButton } from './delete-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
 import { Flame, AlertTriangle } from 'lucide-react';
@@ -18,12 +20,17 @@ function sentimentBadge(sentiment: string) {
   return styles[sentiment] || styles.neutral;
 }
 
-export default async function CheckInsPage() {
+export default async function CheckInsPage({
+  searchParams
+}: {
+  searchParams: Promise<{ sentiment?: string; from?: string; to?: string }>;
+}) {
+  const filters = await searchParams;
   const user = await getUser();
   const isEducator = user?.role === 'owner';
 
   const [feed, streak, flaggedIds] = await Promise.all([
-    getCheckInsForUser(),
+    getCheckInsForUser(filters),
     isEducator ? Promise.resolve(0) : getStreakForUser(),
     isEducator ? getSupportFlaggedUserIds() : Promise.resolve(new Set<number>())
   ]);
@@ -53,6 +60,12 @@ export default async function CheckInsPage() {
         </div>
       )}
 
+      <CheckInFilters
+        sentiment={filters.sentiment}
+        from={filters.from}
+        to={filters.to}
+      />
+
       <Card>
         <CardHeader>
           <CardTitle>
@@ -69,6 +82,7 @@ export default async function CheckInsPage() {
               {feed.map((c) => {
                 const emoji = EMOTION_MAP[c.emotion]?.emoji ?? '•';
                 const needsSupport = isEducator && flaggedIds.has(c.userId);
+                const isOwn = !isEducator && c.userId === user?.id;
                 return (
                   <li
                     key={c.id}
@@ -103,9 +117,12 @@ export default async function CheckInsPage() {
                         <p className="text-sm text-gray-600 mt-1">{c.note}</p>
                       )}
                     </div>
-                    <time className="text-xs text-muted-foreground whitespace-nowrap">
-                      {new Date(c.createdAt).toLocaleDateString()}
-                    </time>
+                    <div className="flex items-center gap-2">
+                      <time className="text-xs text-muted-foreground whitespace-nowrap">
+                        {new Date(c.createdAt).toLocaleDateString()}
+                      </time>
+                      {isOwn && <DeleteCheckInButton checkInId={c.id} />}
+                    </div>
                   </li>
                 );
               })}

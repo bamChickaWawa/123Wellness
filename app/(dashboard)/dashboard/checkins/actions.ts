@@ -59,3 +59,29 @@ export const logCheckIn = validatedActionWithUser(
     };
   }
 );
+
+const deleteCheckInSchema = z.object({
+  checkInId: z.coerce.number().int().positive()
+});
+
+// Students can only delete their own check-ins — ownership is verified
+// server-side before the DELETE runs.
+export const deleteCheckIn = validatedActionWithUser(
+  deleteCheckInSchema,
+  async (data, _formData, user) => {
+    const [existing] = await db
+      .select({ userId: checkIns.userId })
+      .from(checkIns)
+      .where(eq(checkIns.id, data.checkInId))
+      .limit(1);
+
+    if (!existing || existing.userId !== user.id) {
+      return { error: 'Check-in not found or not yours to delete.' };
+    }
+
+    await db.delete(checkIns).where(eq(checkIns.id, data.checkInId));
+
+    revalidatePath('/dashboard/checkins');
+    return { success: 'Check-in deleted.' };
+  }
+);
