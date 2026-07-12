@@ -9,8 +9,8 @@ import { CheckInFilters } from './checkin-filters';
 import { DeleteCheckInButton } from './delete-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { EMOTION_MAP } from '@/lib/wellness/emotions';
-import { hasCrisisKeywords } from '@/lib/wellness/crisis';
-import { Flame, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { hasCrisisKeywords, hasConcernKeywords } from '@/lib/wellness/crisis';
+import { Flame, AlertTriangle, ShieldAlert, Eye } from 'lucide-react';
 
 function sentimentBadge(sentiment: string) {
   const styles: Record<string, string> = {
@@ -36,15 +36,24 @@ export default async function CheckInsPage({
     isEducator ? getSupportFlaggedUserIds() : Promise.resolve(new Set<number>())
   ]);
 
-  // Crisis entries: check-ins whose note contains high-risk language.
-  // Computed here (not stored) — see SOLUTION.md for the tradeoff note.
+  // Tier 1: explicit crisis language → red URGENT banner
+  // Tier 2: softer distress language → yellow Monitor banner (non-crisis only)
+  // Both computed at render time from the note field.
   const crisisEntries = isEducator
     ? feed.filter((c) => hasCrisisKeywords(c.note))
     : [];
+  const crisisCheckInIds = new Set(crisisEntries.map((c) => c.id));
   const crisisUserNames = [
     ...new Set(crisisEntries.map((c) => c.userName || c.userEmail || 'Unknown'))
   ];
-  const crisisCheckInIds = new Set(crisisEntries.map((c) => c.id));
+
+  const concernEntries = isEducator
+    ? feed.filter((c) => !crisisCheckInIds.has(c.id) && hasConcernKeywords(c.note))
+    : [];
+  const concernCheckInIds = new Set(concernEntries.map((c) => c.id));
+  const concernUserNames = [
+    ...new Set(concernEntries.map((c) => c.userName || c.userEmail || 'Unknown'))
+  ];
 
   return (
     <section className="flex-1 p-4 lg:p-8">
@@ -70,6 +79,33 @@ export default async function CheckInsPage({
           <p className="text-xs text-red-600 font-medium">
             Follow your school's crisis response protocol immediately. The
             flagged entries are highlighted in red below.
+          </p>
+        </div>
+      )}
+
+      {/* ── Tier 2: ambiguous distress language ── */}
+      {isEducator && concernEntries.length > 0 && (
+        <div className="mb-6 rounded-lg border-2 border-yellow-400 bg-yellow-50 p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Eye className="h-5 w-5 shrink-0 text-yellow-600" />
+            <span className="font-bold text-yellow-700 uppercase tracking-wide text-sm">
+              Monitor — Language Suggesting Emotional Distress
+            </span>
+          </div>
+          <p className="text-sm text-yellow-700 mb-2">
+            The following student
+            {concernUserNames.length > 1 ? 's have' : ' has'} used language
+            that may indicate they are struggling. No emergency protocol
+            required, but a check-in conversation is recommended:
+          </p>
+          <ul className="text-sm font-semibold text-yellow-700 space-y-0.5 mb-3">
+            {concernUserNames.map((name) => (
+              <li key={name}>• {name}</li>
+            ))}
+          </ul>
+          <p className="text-xs text-yellow-600 font-medium">
+            Flagged entries are highlighted in yellow below. Context matters —
+            use your judgment before acting.
           </p>
         </div>
       )}
@@ -119,8 +155,9 @@ export default async function CheckInsPage({
               {feed.map((c) => {
                 const emoji = EMOTION_MAP[c.emotion]?.emoji ?? '•';
                 const isCrisis = isEducator && crisisCheckInIds.has(c.id);
+                const isConcern = isEducator && concernCheckInIds.has(c.id);
                 const needsSupport =
-                  isEducator && !isCrisis && flaggedIds.has(c.userId);
+                  isEducator && !isCrisis && !isConcern && flaggedIds.has(c.userId);
                 const isOwn = !isEducator && c.userId === user?.id;
                 const canDelete = isOwn && !hasCrisisKeywords(c.note);
 
@@ -130,9 +167,11 @@ export default async function CheckInsPage({
                     className={`flex items-start gap-3 py-3 ${
                       isCrisis
                         ? 'rounded-md border border-red-300 bg-red-50 px-3 -mx-2 my-1'
-                        : needsSupport
-                          ? 'rounded-md bg-amber-50 px-2 -mx-2'
-                          : ''
+                        : isConcern
+                          ? 'rounded-md border border-yellow-300 bg-yellow-50 px-3 -mx-2 my-1'
+                          : needsSupport
+                            ? 'rounded-md bg-amber-50 px-2 -mx-2'
+                            : ''
                     }`}
                   >
                     <span className="text-2xl">{emoji}</span>
@@ -155,6 +194,12 @@ export default async function CheckInsPage({
                           <span className="inline-flex items-center gap-1 rounded-full bg-red-200 px-2 py-0.5 text-xs font-bold text-red-800">
                             <ShieldAlert className="h-3 w-3" />
                             crisis flag
+                          </span>
+                        )}
+                        {isConcern && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-yellow-200 px-2 py-0.5 text-xs font-semibold text-yellow-800">
+                            <Eye className="h-3 w-3" />
+                            monitor
                           </span>
                         )}
                         {needsSupport && (
